@@ -53,7 +53,6 @@ output:  "Hi \"Bob\" \u0026 you!!"
 ```mermaid
 ---
 config:
-  look: handDrawn
   theme: neutral
 ---
 flowchart LR
@@ -86,7 +85,6 @@ type codec struct {
 ```mermaid
 ---
 config:
-  look: handDrawn
   theme: neutral
 ---
 flowchart TD
