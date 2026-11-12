@@ -1,0 +1,9 @@
+# build output
+/server
+/server-*
+*.test
+*.out
+# k6 result files (-e OUT=...)
+results*.json
+result-*.json
+.DS_Store
