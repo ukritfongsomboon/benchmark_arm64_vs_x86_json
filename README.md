@@ -51,6 +51,11 @@ output:  "Hi \"Bob\" \u0026 you!!"
 การเทียบกับ `scalar` ช่วยแยกผลทั้งสองออกจากกัน
 
 ```mermaid
+---
+config:
+  look: handDrawn
+  theme: neutral
+---
 flowchart LR
     std["<b>std</b><br/>encoding/json<br/>reflection + ทีละ 1 byte"]
     scalar["<b>scalar</b><br/>ไม่ใช้ reflection<br/>ทีละ 1 byte"]
@@ -79,6 +84,11 @@ type codec struct {
 `str()` ทำงานเป็น 2 ช่วงสลับกัน
 
 ```mermaid
+---
+config:
+  look: handDrawn
+  theme: neutral
+---
 flowchart TD
     start(["เริ่ม string"]) --> fast
     fast["<b>fast path</b><br/>i += c.index(s[i:])<br/>ข้ามช่วงที่ปลอดภัยทั้งหมด<br/>ในครั้งเดียว<br/>scalar: ทีละ 1 byte<br/>neon: ทีละ 16 byte"]
