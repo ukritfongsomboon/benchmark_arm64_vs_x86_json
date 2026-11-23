@@ -1,0 +1,6 @@
+.git
+images
+*.md
+k6.js
+Dockerfile
+.dockerignore
