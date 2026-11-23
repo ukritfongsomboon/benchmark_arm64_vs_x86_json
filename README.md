@@ -3,7 +3,7 @@
 เทียบความเร็ว JSON encoding ของ Go ระหว่าง **x86 standard**, **ARM standard** และ **ARM + NEON (SIMD)**
 แบบง่ายที่สุด: server ตัวเดียว + k6 script ตัวเดียว รันจบแล้ว **k6 พิมพ์ตารางเทียบให้เลย**
 
-ไม่ใช้ Docker, ไม่ใช้ cgo, ไม่มี dependency นอก standard library
+ไม่ใช้ cgo, ไม่มี dependency นอก standard library (รันเป็น binary ตรง ๆ หรือ [รันเป็น Docker container](#รันด้วย-docker-container) ก็ได้)
 
 ---
 
@@ -327,6 +327,8 @@ curl -s localhost:8080/info
 | `neon_other.go` | stub สำหรับ x86 (ไม่มี NEON) |
 | `main_test.go` | ตรวจว่าทุก encoder ให้ผล **ตรงกับ `encoding/json` ทุก byte** |
 | `k6.js` | ยิงโหลดและพิมพ์ตารางเทียบ |
+| `Dockerfile` | build image แบบ multi-stage (test → binary static → distroless) รองรับ arm64/amd64 |
+| `.dockerignore` | ไฟล์ที่ไม่ส่งเข้า Docker build |
 
 ---
 
@@ -359,7 +361,7 @@ GET  /ping   GET /info   GET /cpu
 
 ## สิ่งที่ต้องมีบนเครื่อง
 
-- **Go 1.25+** (หรือใช้ Docker build ให้ — ดูข้างล่าง)
+- **Go 1.25+** (หรือใช้ Docker แทน — ดู [รันด้วย Docker](#รันด้วย-docker-container))
 - **k6** — https://grafana.com/docs/k6/latest/set-up/install-k6/ (หรือใช้ Docker image `grafana/k6`)
 - `taskset` (มีใน Linux อยู่แล้ว, package `util-linux`)
 
@@ -491,6 +493,130 @@ k6 จะพิมพ์ตารางแบบนี้ (ตัวอย่า
 
 ต้องใช้ค่าเหมือนกันทั้งสองเครื่อง: จำนวน core ของ server (`taskset`), `VUS`, `DURATION`
 และควรระบุในรายงาน: รุ่น CPU (`lscpu`), จำนวน physical core, ราคา VM
+
+---
+
+## รันด้วย Docker (container)
+
+ใช้แทนขั้นที่ 1–2 ข้างบนได้ ไม่ต้องติดตั้ง Go บนเครื่อง — `Dockerfile` ทำงานดังนี้:
+
+1. **build stage** (`golang:1.25-alpine`) รัน `go vet` + `go test` ก่อน ถ้า test ไม่ผ่าน build จะล้ม
+2. compile แบบ static (`CGO_ENABLED=0`) สำหรับ `TARGETARCH` — cross-compile จาก host โดยตรง ไม่ต้องใช้ QEMU
+   (`neon_arm64.s` ถูก assemble เฉพาะตอน `TARGETARCH=arm64`)
+3. **runtime stage** (`distroless/static`, user `nonroot`) มีแค่ binary ตัวเดียว — image ~14 MB
+
+### Build image
+
+```bash
+docker build -t go-neon-simple .                          # arch เดียวกับเครื่อง
+docker build --platform linux/amd64 -t go-neon-simple:amd64 .   # x86 (ไม่มี /neon/)
+docker build --platform linux/arm64 -t go-neon-simple:arm64 .   # ARM (มี /neon/)
+
+# multi-arch image แล้ว push ขึ้น registry (ต้องใช้ buildx)
+docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/go-neon-simple:latest --push .
+```
+
+### รัน container
+
+```bash
+docker run --rm -p 8080:8080 go-neon-simple
+curl localhost:8080/info
+# {"go":"go1.25.x","goarch":"arm64","gomaxprocs":8,"neon":true}
+```
+
+เปลี่ยน port ด้วย env `ADDR` เช่น `-e ADDR=:9090 -p 9090:9090`
+
+### Benchmark ด้วย container (แทน `taskset`)
+
+แยก core ให้ server กับ k6 เหมือนเดิม โดยใช้ `--cpuset-cpus` แทน `taskset`:
+
+```bash
+# terminal 1: server ใช้ core 0-3
+docker run --rm --name gns --network host --cpuset-cpus 0-3 go-neon-simple
+
+# terminal 2: k6 ใช้ core 4-7
+docker run --rm -i --network host --cpuset-cpus 4-7 -u "$(id -u):$(id -g)" \
+  -v "$PWD":/w -w /w grafana/k6:1.3.0 run -e OUT=results-arm.json k6.js | tee results-arm.txt
+```
+
+server log ต้องเห็น `gomaxprocs=4` (Go อ่านจำนวน core จาก cpuset/cgroup ของ container ให้เอง)
+
+**macOS / Windows (Docker Desktop):** `--network host` ใช้ไม่ได้ตามค่าเริ่มต้น ให้ใช้ `-p 8080:8080` กับ server
+แล้วรัน k6 บนเครื่อง host ตรง ๆ หรือรัน k6 container ด้วย `-e URL=http://host.docker.internal:8080`
+
+### คำสั่ง k6 สำหรับยิง container
+
+เปิด server ไว้ก่อน (เลือกแบบใดแบบหนึ่ง):
+
+```bash
+# Linux
+docker run --rm --name gns --network host --cpuset-cpus 0-3 go-neon-simple
+
+# macOS / Windows (Docker Desktop)
+docker run --rm --name gns -p 8080:8080 --cpus 4 go-neon-simple
+```
+
+**ก. k6 ติดตั้งบนเครื่อง host** — ยิงไปที่ `localhost:8080` ได้เลย:
+
+```bash
+k6 run k6.js                                                   # ARM: std vs neon
+k6 run -e ENCODERS=std,scalar,neon k6.js                       # + scalar แยกผลของ SIMD
+k6 run -e ENCODERS=std k6.js                                   # x86 (ไม่มี NEON)
+k6 run -e OUT=results-arm.json k6.js | tee results-arm.txt     # เก็บผลลงไฟล์
+```
+
+**ข. k6 เป็น container (Linux, `--network host`)**:
+
+```bash
+docker run --rm -i --network host --cpuset-cpus 4-7 -u "$(id -u):$(id -g)" \
+  -v "$PWD":/w -w /w grafana/k6:1.3.0 run \
+  -e ENCODERS=std,scalar,neon -e OUT=results-arm.json k6.js | tee results-arm.txt
+```
+
+**ค. k6 เป็น container (macOS / Windows)** — ยิงผ่าน `host.docker.internal`:
+
+```bash
+docker run --rm -i -v "$PWD":/w -w /w grafana/k6:1.3.0 run \
+  -e URL=http://host.docker.internal:8080 \
+  -e ENCODERS=std,scalar,neon -e OUT=results-arm.json k6.js | tee results-arm.txt
+```
+
+**ง. server กับ k6 อยู่ใน Docker network เดียวกัน** (ใช้ได้ทุก OS ไม่ต้อง map port):
+
+```bash
+docker network create bench
+docker run --rm -d --name gns --network bench --cpus 4 go-neon-simple
+docker run --rm -i --network bench -v "$PWD":/w -w /w grafana/k6:1.3.0 run \
+  -e URL=http://gns:8080 -e ENCODERS=std,scalar,neon k6.js
+docker stop gns && docker network rm bench
+```
+
+ตัวอย่างที่ใช้บ่อย (ใส่ `-e` เพิ่มต่อจากคำสั่งข้างบนได้ทุกแบบ):
+
+```bash
+# smoke test เร็ว ๆ (~30 วินาที) ไว้เช็กว่ายิงถึง server
+k6 run -e ENDPOINTS=small,large -e WARMUP=1 -e DURATION=3 k6.js
+
+# เฉพาะ large วัดนาน 60 วินาที
+k6 run -e ENDPOINTS=large -e DURATION=60 k6.js
+
+# ยิงคงที่ 3000 req/s แล้วดู CPU ต่อ request
+k6 run -e MODE=rate -e RATE=3000 k6.js
+
+# connection มากขึ้น
+k6 run -e VUS=64 k6.js
+```
+
+ถ้า k6 ขึ้น `cannot reach .../info` แปลว่า `URL` ชี้ไม่ถึง server (เช็ก port / network)
+ถ้าขึ้น `server (amd64) has no NEON` ให้ใส่ `-e ENCODERS=std` (หรือ `std,scalar`)
+
+### ข้อควรระวังเมื่อวัดผลใน container
+
+- **Docker Desktop บน Mac/Windows** รัน container ใน Linux VM — ตัวเลขจะต่ำกว่ารันตรง ๆ
+  แต่ยังเทียบ `std` / `scalar` / `neon` กันเองได้ เพราะอยู่ในสภาพแวดล้อมเดียวกัน
+- **ห้ามใช้ image amd64 บน Mac ARM (หรือ arm64 บน x86) วัดผล** — CPU ถูกจำลองผ่าน Rosetta/QEMU
+  ตัวเลขไม่มีความหมาย ถ้าจะเทียบ x86 กับ ARM ให้รัน image ที่ตรง arch บนเครื่องจริงแต่ละแบบ
+- บน Linux VM จริง container แทบไม่มี overhead (`--network host` ไม่ผ่าน NAT) ผลจึงใกล้กับรัน binary ตรง ๆ
 
 ---
 
